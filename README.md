@@ -5,3 +5,5 @@ Communication with DSP board via I2C.
 
 Please see [GhettoDSP](https://github.com/djamps/GhettoPWR)
 
+[PCB project](https://oshwlab.com/k6rp/boom-box-power-control-unit_copy_copy_copy_copy)
+
