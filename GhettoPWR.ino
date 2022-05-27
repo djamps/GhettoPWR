@@ -177,7 +177,7 @@ void setup() {
     stateLv = 1; // Turn on LV so we can read battery state
     digitalWrite(pinBuck, stateLv);
     statePower = 0;
-    chargingLast = 1;
+    //chargingLast = 1;
     delay(200);
   } else {
     // Wait until power button is released to continue
@@ -610,8 +610,8 @@ void checkPowerButton() {
 }
 
 void handleCharging() {
-  // Only run once per 30 seconds
-  if ( ( ( millis() - 30000 > chargingLast ) || chargingLast == 1 )  ) {
+  // Only run once per 15 seconds
+  if ( (( millis() > 15000 ) && ( millis() - 15000 > chargingLast )) || chargingLast == 0 ) {
     chargingLast = millis();
     // Disable charging briefly to check voltages
     digitalWrite(pinCharge, LOW);
@@ -622,15 +622,22 @@ void handleCharging() {
     // If average voltage dropped below the threshold, clear the shitterWasFull flag and allow charging again
     if ( voltageBattAvg < voltageBattResumeCharge ) {
       shitterWasFull = false;
+      doDebug("Charge: Reset shitter flag");
     }
     // Is the charging voltage high enough and we're not overheating
-    if ( voltageCharge > voltageBatt && voltageBatt > voltageBattMinCharge && voltageBatt < settings.voltageBattMaxCharge && !shitterWasFull && tempC < tempShutdown ) {
+    if (  voltageCharge > voltageBattAvg 
+           && voltageBattAvg > voltageBattMinCharge 
+           && voltageBattAvg < settings.voltageBattMaxCharge 
+           && !shitterWasFull 
+           && tempC < tempShutdown ) {
       // Start charging
       digitalWrite(pinCharge, HIGH);
       stateCharging = 1;
-    } else if ( voltageBatt >= settings.voltageBattMaxCharge ) {
+      doDebug("Charge: Begin1");
+    } else if ( voltageBattAvg >= settings.voltageBattMaxCharge ) {
       // Battery is full.   Quit charging until voltage drops below the resume threshold
       shitterWasFull = true;
+      doDebug("Charge: Full + set shitter flag");
     } else if ( !statePower && ( shitterWasFull || ( voltageCharge < settings.voltageBattMaxCharge )  ) && stateLv ) {
       // Charging power removed or charging finished while in power off state
       doDebug("Shutdown: No longer charging");
@@ -724,7 +731,11 @@ void doLog() {
     Trace (F(" tC: "));
     Trace (tempC);
     Trace (F(" sB: "));
-    Traceln (stateBattery);
+    Trace (stateBattery);
+    Trace (F(" mC: "));
+    Trace (settings.voltageBattMaxCharge);
+    Trace (F(" vC: "));
+    Traceln (settings.vComp);
   }
 }
 
