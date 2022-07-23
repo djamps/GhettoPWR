@@ -1,6 +1,7 @@
 #define DEBUG true
 #define TEMP true // Temp sensor present
-//#define OLDFAN true // for <= 0.4b boards
+//#define REV04B true // for <= 0.4b boards
+#define REV05 true // for >=0.5 boards
 
 #include <SPI.h>
 #include <Wire.h>
@@ -59,6 +60,9 @@ float voltageBattRestingFull = 13.2; // Full battery resting voltage (for percen
 float voltageBattRestingEmpty = 12.4; // Empty battery resting voltage (for percent calc)
 float voltageBattChargingEmpty = 13.0; // Empty battery charging voltage (for percent calc)
 float voltageBattChargingFull = 13.7; // Full battery charging voltage (for percent calc)
+#ifdef REV05
+float voltageChargeInMin = 11.8;  // Minimum charging input voltage
+#endif
 
 float cutoffHv = 11; // Power off amp below this battery voltage
 float cutonHv = 11.5; // Power amp back on above this battery voltage
@@ -81,7 +85,7 @@ uint8_t pinMute = 4; // Signal detection input / HIGH = signal, LOW = no signal
 uint8_t pinLed = 5; // Status LED output
 uint8_t pinButton = 6; // Power on/off button input
 uint8_t pinCharge = 7; // Charge turn on output / HIGH = charge
-#ifdef OLDFAN
+#ifdef REV04B
   uint8_t pinFan = 0; // Fan control output // 0 for <= 0.4b, 9 for >= 0.4c rev boards
 #else
   uint8_t pinFan = 9; // Fan control output // 0 for <= 0.4b, 9 for >= 0.4c rev boards
@@ -89,8 +93,11 @@ uint8_t pinCharge = 7; // Charge turn on output / HIGH = charge
 uint8_t pinVbatt = A0; // Battery voltage sense input
 uint8_t pinVbuck = A1; // Buck converter voltage sense input
 uint8_t pinVboost = A2; // Boost converter voltage sense input
-uint8_t pinVcharge = A3; // External charging voltage sense input
+uint8_t pinVchargeOut = A3; // Charging Boost/Buck output
 uint8_t pinTemp = A6; // Temp sensor input
+#ifdef REV05
+  uint8_t pinVchargeIn = A7; // Charging Boost/Buck input
+#endif
 
 // Temperature and fanspeed settings
 unsigned long lastFanSpeedChange = 0;
@@ -101,7 +108,7 @@ uint8_t fanSpeedHigh = 255;
 uint8_t fanTempLow = 35; // Temp in C for low fanspeed
 uint8_t fanTempMed = 40; // Temp in C for medium fanspeed
 uint8_t fanTempHigh = 45; // Temp in C for high fanspeed
-uint8_t tempShutdown = 50; // Temp in C for total shutdown
+uint8_t tempShutdown = 65; // Temp in C for total shutdown
 
 bool stateLv = LOW; // Buck converter on/off
 bool stateHv = LOW; // Boost converter on/off
@@ -135,7 +142,10 @@ float voltageBatt = 0; // Measured power supply voltage (instantanious)
 float voltageBuck = 0; // Measured buck supply voltage
 float voltageBoost = 0; // Measured boost supply voltage
 float voltageBattAvg = 0; // Average power supply voltage
-float voltageCharge = 0; // Measured charging input voltage
+float voltageChargeOut = 0; // Measured charging input voltage
+#ifdef REV05
+float voltageChargeIn = 0; // Measured charging input voltage
+#endif
 int unsigned voltageBattAvgCount = 0; // Related to battery voltage averaging
 float voltageBattAvgSum = 0; // Related to battery voltage averaging
 float voltageMax = -1; // Related to measuring battery voltage deviation
@@ -237,7 +247,7 @@ void requestEvent() {
     float voltageBattAvg;
     //float voltageBuck;
     //float voltageBoost;
-    //float voltageCharge;
+    //float voltageChargeOut;
     float tempC;
     bool statePower;
     bool stateCharging;
@@ -249,7 +259,7 @@ void requestEvent() {
   response.voltageBattAvg = voltageBattAvg;
   //response.voltageBuck = voltageBuck;
   //response.voltageBoost = voltageBoost;
-  //response.voltageCharge = voltageCharge;
+  //response.voltageChargeOut = voltageChargeOut;
   response.tempC = tempCAvg;
   response.statePower = statePower;
   response.stateCharging = stateCharging;
@@ -387,7 +397,7 @@ void calcPwrState() {
   }
   // Stuff to check always
   // If sufficiant charge voltage, turn on LV (if not already charged)
-  if ( voltageCharge > settings.voltageBattMaxCharge && !shitterWasFull ) {
+  if ( voltageChargeOut > settings.voltageBattMaxCharge && !shitterWasFull ) {
     stateLv = 1;
   }
   // Check for over temperature
@@ -461,7 +471,11 @@ void readVoltages() {
   voltageBatt = analogRead(pinVbatt) / settings.vComp;
   voltageBuck = analogRead(pinVbuck) / settings.vComp;
   voltageBoost = analogRead(pinVboost) / settings.vComp;
-  voltageCharge = analogRead(pinVcharge) / settings.vComp;
+  voltageChargeOut = analogRead(pinVchargeOut) / settings.vComp;
+
+  #ifdef REV05
+  voltageChargeIn = analogRead(pinVchargeIn) / settings.vComp;
+  #endif
 
   if ( voltageBattAvg == 0 )
   {
@@ -610,8 +624,15 @@ void checkPowerButton() {
 }
 
 void handleCharging() {
-  // Only run once per 15 seconds
-  if ( (( millis() > 15000 ) && ( millis() - 15000 > chargingLast )) || chargingLast == 0 ) {
+  #ifdef REV05
+  if ( stateCharging == 1 && voltageChargeIn < voltageChargeInMin ) {
+    digitalWrite(pinCharge, LOW);
+    stateCharging = 0;
+    doDebug("Charge: Stopping for low input voltage");
+  }
+  #endif
+  // Only run once per 30 seconds
+  if ( (( millis() > 30000 ) && ( millis() - 30000 > chargingLast )) || chargingLast == 0 ) {
     chargingLast = millis();
     // Disable charging briefly to check voltages
     digitalWrite(pinCharge, LOW);
@@ -625,10 +646,13 @@ void handleCharging() {
       doDebug("Charge: Reset shitter flag");
     }
     // Is the charging voltage high enough and we're not overheating
-    if (  voltageCharge > voltageBattAvg 
+    if (  voltageChargeOut > voltageBattAvg 
            && voltageBattAvg > voltageBattMinCharge 
            && voltageBattAvg < settings.voltageBattMaxCharge 
            && !shitterWasFull 
+           #ifdef REV05
+           && voltageChargeIn > voltageChargeInMin
+           #endif
            && tempC < tempShutdown ) {
       // Start charging
       digitalWrite(pinCharge, HIGH);
@@ -638,14 +662,14 @@ void handleCharging() {
       // Battery is full.   Quit charging until voltage drops below the resume threshold
       shitterWasFull = true;
       doDebug("Charge: Full + set shitter flag");
-    } else if ( !statePower && ( shitterWasFull || ( voltageCharge < settings.voltageBattMaxCharge )  ) && stateLv ) {
+    } else if ( !statePower && ( shitterWasFull || ( voltageChargeOut < settings.voltageBattMaxCharge )  ) && stateLv ) {
       // Charging power removed or charging finished while in power off state
       doDebug("Shutdown: No longer charging");
       doPowerOff();
     }
     // Shut down if not plugged into adequate charger and not charging in poweroff state.
     // This is to protect the battery when charging is done or stopped for whatever reason
-    //if ( voltageCharge < settings.voltageBattMaxCharge && statePower == 0 ) {
+    //if ( voltageChargeOut < settings.voltageBattMaxCharge && statePower == 0 ) {
       
     //}
    }
@@ -706,7 +730,11 @@ void doDebug(const char *text) {
 
 void doLog() {
   if ( DEBUG ) {
+    #ifdef REV05
+    Trace (F("Vbatt/Avg/Vbuck/Vboost/VchI/VchO: "));
+    #else
     Trace (F("Vbatt/Avg/Vbuck/Vboost/Vch: "));
+    #endif
     Trace (voltageBatt);
     Trace (F("/"));
     Trace (voltageBattAvg);
@@ -714,8 +742,12 @@ void doLog() {
     Trace (voltageBuck);
     Trace (F("/"));
     Trace (voltageBoost);
+    #ifdef REV05
     Trace (F("/"));
-    Trace (voltageCharge);
+    Trace (voltageChargeIn);
+    #endif
+    Trace (F("/"));
+    Trace (voltageChargeOut);
     Trace (F(" stateHv/LV/CH/SF: "));
     //Trace (digitalRead(pinBoost));
     Trace (stateHv);
