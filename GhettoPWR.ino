@@ -1,8 +1,19 @@
-#define DEBUG true
+//#define DEBUG true
 #define TEMP true // Temp sensor present
-//#define REV04B true // for <= 0.4b boards
-#define REV05 true // for >=0.5 boards
+//#define REV04B true // for <= 0.4b boards (comment both for 0.4c)
+#define REV05 true // for >=0.5 boards (comment both for 0.4c)
+#define SIGDET 1  // Signal detect mode: 2 = Always on, 1 = I2C, 0 = Mute pin
+#define WATCHDOG true // I2C Watchdog timer
 
+// Poweroff Reason (# of blinks)
+// 6 = No longer charging
+// 5 = Critical battery level
+// 4 = Over temperature
+// 3 = Watchdog
+// 2 = Inactivity
+// 1 = Button push
+
+#include <avr/wdt.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <I2C_Anything.h>
@@ -24,9 +35,10 @@ class tSPIdebug : public Print
   public:
     virtual size_t write (const byte c)
     {
-      digitalWrite(SS, LOW);
+      // Not needed, and SS conflicts with D10
+      //digitalWrite(SS, LOW);
       SPI.transfer (c);
-      digitalWrite(SS, HIGH);
+      //digitalWrite(SS, HIGH);
       return 1;
     }  // end of tSPIdebug::write
 }; // end of tSPIdebug
@@ -64,16 +76,21 @@ float voltageBattChargingFull = 13.7; // Full battery charging voltage (for perc
 float voltageChargeInMin = 11.8;  // Minimum charging input voltage
 #endif
 
-float cutoffHv = 11; // Power off amp below this battery voltage
-float cutonHv = 11.5; // Power amp back on above this battery voltage
-float cutoffLv = 10.5; // System auto-off below this battery voltage
+float cutoffHv = 12.0; // Power off amp below this battery voltage
+float cutonHv = 12.5; // Power amp back on above this battery voltage
+float cutoffLv = 11.5; // System auto-off below this battery voltage
 
+unsigned long last500mSecTask = 0;
 unsigned long powerStateDelay = 5000; // Delay in power state changes (on back to off)
 unsigned long autoShutOffDelay = 600000; // How long without audio until total system shutoff in mS
-unsigned long standbyDelay = 30000; // How long without audio until amp (boost) power down in mS (0 = disable)
-unsigned long watchDogTimer = 3000; // Poweroff if nothing recieved from DSP in x milliseconds ( 0 = disable )
+unsigned long standbyDelay = 60000; // How long without audio until amp (boost) power down in mS (0 = disable)
+#ifdef WATCHDOG
+unsigned long watchDogTimer = 8000; // Poweroff if nothing recieved from DSP in x milliseconds ( 0 = disable )
+#else
+unsigned long watchDogTimer = 0;
+#endif
 unsigned long requestEventLast = 0;
-bool signalDetectMode = 1;  // 1 = I2C from ghettoDSP, 0 = Mute pin
+uint8_t signalDetectMode = SIGDET;  // 2 = Always on, 1 = I2C from ghettoDSP, 0 = Mute pin
 // End configurable options
 
 bool watchDogTimerDisabled = false; // Internal flag for temporary disable (DSP programming, ect)
@@ -98,6 +115,7 @@ uint8_t pinTemp = A6; // Temp sensor input
 #ifdef REV05
   uint8_t pinVchargeIn = A7; // Charging Boost/Buck input
 #endif
+uint8_t pinDSP = 10;
 
 // Temperature and fanspeed settings
 unsigned long lastFanSpeedChange = 0;
@@ -157,10 +175,12 @@ float tempC = 0; // Sensor temperature in C
 unsigned long ledTimer = millis();
 
 void setup() {
+  wdt_enable(WDTO_8S);
+  wdt_reset();
   beginDebug ();
-  if ( DEBUG ) {
+  #ifdef DEBUG
     Traceln(F("*******************************"));
-  }
+  #endif
 
   // Load non-volatile settings
   readEEPROM();
@@ -168,7 +188,9 @@ void setup() {
   Wire.begin(I2C_SLAVE_ADDRESS);
   Wire.onRequest(requestEvent);
   Wire.onReceive(receiveEvent);
-
+  
+  pinMode(pinDSP, OUTPUT);
+  digitalWrite(pinDSP, LOW);
   pinMode(pinFan, OUTPUT);
   analogWrite(pinFan, 0);
   pinMode(pinTemp, INPUT);
@@ -181,23 +203,27 @@ void setup() {
   digitalWrite(pinLed, HIGH);
   pinMode(pinMute, INPUT);
   pinMode(pinButton, INPUT);
+
+  readVoltages();
+  
   //digitalWrite(pinButton, LOW); // disable pullup
   // Was the button pressed?   If not, then we are charging or programming
   if ( digitalRead(pinButton) == LOW ) {
     stateLv = 1; // Turn on LV so we can read battery state
     digitalWrite(pinBuck, stateLv);
+    digitalWrite(pinDSP, LOW);
+    watchDogTimerDisabled = true;
     statePower = 0;
     //chargingLast = 1;
     delay(200);
   } else {
+    // Hold MCU power on
+    stateLv = 1; // Turn on LV so we can read battery state
+    digitalWrite(pinBuck, stateLv);
     // Wait until power button is released to continue
-    //stateLv = HIGH;
-    //digitalWrite(pinBuck, stateLv);
-    statePower = 1;
+    //while (digitalRead(pinButton) == HIGH);
+    delay(100);
     doPowerOn();
-    while (digitalRead(pinButton) == HIGH);
-    // Debounce and let buck/boost come up
-    delay(200);
   }
 }
 
@@ -211,14 +237,14 @@ void receiveEvent(int nBytes) {
   I2C_readAnything(vComp);
   I2C_readAnything(watchDogTimerDisabled);
   
-  if ( DEBUG ) {
+  #ifdef DEBUG
     Trace (F("Got audioDetected / voltageBattMaxCharge / vComp: "));
     Trace (audioDetected);
     Trace (F(" / "));
     Trace (voltageBattMaxCharge);
     Trace (F(" / "));
     Traceln (vComp);
-  }
+  #endif
   if ( voltageBattMaxCharge != settings.voltageBattMaxCharge || vComp != settings.vComp  ) {
     settings.voltageBattMaxCharge = voltageBattMaxCharge;
     settings.vComp = vComp;
@@ -237,6 +263,7 @@ void receiveEvent(int nBytes) {
   }
 
   requestEventLast = millis();
+  //Traceln ("receiveEvent()");
 
 }
 
@@ -270,6 +297,7 @@ void requestEvent() {
   Wire.write ((byte *) &response, sizeof response);
   
   requestEventLast = millis(); // For watchdog
+  //Traceln ("requestEvent()");
 }
 
 void handleLedState() {
@@ -364,7 +392,7 @@ void handleLedState() {
 
 void calcPwrState() {
   // Voltage above cutoff?
-  if (  voltageBatt > cutonHv  )
+  if ( voltageBattAvg > cutonHv )
   {
     stateBattery = 2;
     // Audio signal detected?
@@ -388,12 +416,15 @@ void calcPwrState() {
     stateBattery = 1;
   }
   // Battery critically low.  Shut everything down.
-  if (  voltageBatt < cutoffLv && voltageBattAvg < cutoffLv && statePower == 1 && !stateCharging )
+  if (  voltageBattAvg < cutoffLv && voltageBattAvg < cutoffLv && statePower == 1 && !stateCharging  )
   {
     doDebug("Shutdown: Battery critical");
     doLog();
+    blinkLed(5);
     doPowerOff();
     stateBattery = 0;
+  } else {
+    
   }
   // Stuff to check always
   // If sufficiant charge voltage, turn on LV (if not already charged)
@@ -403,6 +434,7 @@ void calcPwrState() {
   // Check for over temperature
   if (  tempCAvg > tempShutdown && millis() > 5000 ) {
     doDebug("Shutdown: Over temp");
+    blinkLed(4);
     doPowerOff();
   }
   // Watchdog timeout poweroff (if DSP board is not responding, shut it off)
@@ -413,6 +445,7 @@ void calcPwrState() {
         && millis() - watchDogTimer > requestEventLast 
   ) {
     doDebug("Shutdown: Watchdog!");
+    blinkLed(3);
     doPowerOff();
   }
 
@@ -420,6 +453,7 @@ void calcPwrState() {
 
 void handleFanState() {
   if ( millis() - 5000 >= lastFanSpeedChange ) {
+    #ifdef TEMP
     if ( stateCharging == 1 ) {
       // Run full blast when charging to cool the buck/boost converter
       fanSpeed = fanSpeedHigh;
@@ -437,6 +471,9 @@ void handleFanState() {
     } else {
       fanSpeed = 0;
     }
+    #else
+    fanSpeed = fanSpeedHigh;
+    #endif
     analogWrite(pinFan,fanSpeed);
     lastFanSpeedChange = millis();
   }
@@ -462,6 +499,7 @@ void handlePwrState() {
   {
     // Inactivity shutdown
     doDebug("Shutdown: Inactivity");
+    blinkLed(2);
     doPowerOff();
   }
 }
@@ -554,9 +592,9 @@ void readVoltages() {
   }
 
   // Get temperature
-  if ( TEMP ) {
+  #if TEMP
     tempC = ((float(analogRead(pinTemp))*5.0/1024)-0.5)*100;
-  }
+  #endif
 
   if ( tempCAvg == 0 ) {
     tempCAvg = tempC;
@@ -581,41 +619,40 @@ void doPowerOff() {
   digitalWrite(pinBoost, LOW);
   stateHv = 0;
   statePower = 0;
-  delay(3000);
-  //digitalWrite(pinLed, LOW);
-  pinMode(pinBuck, LOW);
-  stateLv = 0;
-  //if ( !stateCharging ) { stateLv = 0; }
-  audioDetected = 0;
-  // Let the caps discharge
   delay(2000);
+  digitalWrite(pinDSP, LOW);
+  digitalWrite(pinBuck, LOW);
+  stateLv = 0;
+  audioDetected = 0;
+  // Let the caps discharge (turnoff pop)
+  delay(1500);
   lastPwrStateChange = millis();
+  watchDogTimerDisabled = true;
 }
 
 void doPowerOn() {
-  // Pop avoidance:
-  // Turn on DSP first, then wait a few seconds before powering up the amp
-  //pinMode(pinBuck, OUTPUT);
-  digitalWrite(pinBuck, HIGH);
+  digitalWrite(pinDSP, HIGH);
   stateLv = HIGH;
+  digitalWrite(pinBuck, HIGH);
   statePower = 1;
   delay(500);
-  //digitalWrite(pinBoost, HIGH);
-  //stateHv = 1;
-  //audioDetected = 1; // For beeps and boops
+  if ( signalDetectMode == 2 ) {
+    audioDetected = 1; // Always on
+  }
   lastPwrStateChange = millis();
   lastNoAudioDetected = millis();
   requestEventLast = millis();
 }
 
 void checkPowerButton() {
-  if ( digitalRead(pinButton) == HIGH ) {
+  if ( digitalRead(pinButton) == HIGH && millis() > 5000 ) {
     // Wait until release
     while (digitalRead(pinButton) == HIGH);
     //debounce
     delay(10);
     if ( statePower == 1 ) {
       doDebug("Shutdown: Button push");
+      blinkLed(1);
       doPowerOff();
     } else {
       doPowerOn();
@@ -631,24 +668,23 @@ void handleCharging() {
     doDebug("Charge: Stopping for low input voltage");
   }
   #endif
-  // Only run once per 30 seconds
-  if ( (( millis() > 30000 ) && ( millis() - 30000 > chargingLast )) || chargingLast == 0 ) {
+  // Only run once per 30 seconds while charging
+  if ( (( millis() > 30000 ) && ( millis() - 30000 > chargingLast )) || !chargingLast || !stateCharging ) {
     chargingLast = millis();
     // Disable charging briefly to check voltages
     digitalWrite(pinCharge, LOW);
     stateCharging = 0;
-    //if ( statePower == 0 ) { stateLv = LOW; }
     delay(100);
     readVoltages();
-    // If average voltage dropped below the threshold, clear the shitterWasFull flag and allow charging again
-    if ( voltageBattAvg < voltageBattResumeCharge ) {
+    // If voltage dropped below the threshold, clear the shitterWasFull flag and allow charging again
+    if ( voltageBatt < voltageBattResumeCharge && shitterWasFull == true ) {
       shitterWasFull = false;
       doDebug("Charge: Reset shitter flag");
     }
     // Is the charging voltage high enough and we're not overheating
-    if (  voltageChargeOut > voltageBattAvg 
-           && voltageBattAvg > voltageBattMinCharge 
-           && voltageBattAvg < settings.voltageBattMaxCharge 
+    if (  voltageChargeOut > voltageBatt 
+           && voltageBatt > voltageBattMinCharge 
+           && voltageBatt < settings.voltageBattMaxCharge 
            && !shitterWasFull 
            #ifdef REV05
            && voltageChargeIn > voltageChargeInMin
@@ -657,14 +693,19 @@ void handleCharging() {
       // Start charging
       digitalWrite(pinCharge, HIGH);
       stateCharging = 1;
-      doDebug("Charge: Begin1");
+      //doDebug("Charge: Begin1");
     } else if ( voltageBattAvg >= settings.voltageBattMaxCharge ) {
       // Battery is full.   Quit charging until voltage drops below the resume threshold
       shitterWasFull = true;
       doDebug("Charge: Full + set shitter flag");
+      // If we're not powered on, shut down so it doesn't stay secretly on after charger removal.
+//      if ( !statePower ) {
+//        doPowerOff();
+//      }
     } else if ( !statePower && ( shitterWasFull || ( voltageChargeOut < settings.voltageBattMaxCharge )  ) && stateLv ) {
       // Charging power removed or charging finished while in power off state
       doDebug("Shutdown: No longer charging");
+      blinkLed(6);
       doPowerOff();
     }
     // Shut down if not plugged into adequate charger and not charging in poweroff state.
@@ -676,39 +717,54 @@ void handleCharging() {
 }
 
 void loop() {
+    // Measure power supply voltages
+    readVoltages();
 
-  // Measure power supply voltages
-  readVoltages();
+    // Calculate optimum power state
+    calcPwrState();
 
-  // Calculate optimum power state
-  calcPwrState();
+    // Control power state
+    handlePwrState();
+
+    // Measure power supply voltages
+    readVoltages();
+
+  // Handle these 500ms tasks
+  if ( millis() > 500 && millis() - 500 >= last500mSecTask  ) {
+    
+    // Reset HW watchdog
+    wdt_reset();
+
+
+
+    // See if we need to charge
+    if ( stateLv ) {
+      handleCharging();
+    }
+
+
+
+    // Control fan state
+    handleFanState();
+  
+    last500mSecTask = millis();
+  }
 
   // Handle LED state
   handleLedState();
 
-  // See if we need to charge
-  handleCharging();
-
-
-
   checkPowerButton();
-
-
-
-  // Control power state
-  handlePwrState();
-
-  // Control fan state
-  handleFanState();
 
   // Check if signal is detected in mute pin mode
   checkMutePin();
 
   // Debug
+  #ifdef DEBUG
   if ( millis() - 1000  > lastLogLine ) {
     doLog();
     lastLogLine = millis();
   }
+  #endif
 }
 
 void checkMutePin() {
@@ -723,13 +779,13 @@ void checkMutePin() {
 }
 
 void doDebug(const char *text) {
-  if ( DEBUG ) {
+  #ifdef DEBUG
     Traceln(text);
-  }
+  #endif
 }
 
 void doLog() {
-  if ( DEBUG ) {
+  #ifdef DEBUG
     #ifdef REV05
     Trace (F("Vbatt/Avg/Vbuck/Vboost/VchI/VchO: "));
     #else
@@ -748,12 +804,12 @@ void doLog() {
     #endif
     Trace (F("/"));
     Trace (voltageChargeOut);
-    Trace (F(" stateHv/LV/CH/SF: "));
+    Trace (F(" stateHv/LV/DSP/CH/SF: "));
     //Trace (digitalRead(pinBoost));
     Trace (stateHv);
     //Trace (digitalRead(pinBuck));
     Trace (stateLv);
-    //Trace (digitalRead(pinCharge));
+    Trace (digitalRead(pinDSP));
     Trace (stateCharging);
     Trace (shitterWasFull);
     Trace (F(" aD: "));
@@ -768,7 +824,18 @@ void doLog() {
     Trace (settings.voltageBattMaxCharge);
     Trace (F(" vC: "));
     Traceln (settings.vComp);
+  #endif
+}
+
+void blinkLed(int n) {
+  while(n > 0 ) {
+    digitalWrite(pinLed,false);
+    delay(300);
+    digitalWrite(pinLed,true);
+    delay(300);
+    n--;
   }
+  digitalWrite(pinLed,false);
 }
 
 void readEEPROM() {
@@ -781,16 +848,16 @@ void readEEPROM() {
       *((char*)&settings + t) = EEPROM.read(CONFIG_START + t);
     }
   } else {
-    if ( DEBUG ) {
+    #ifdef DEBUG
       Traceln("EEPROM Load failed");
-    }
+    #endif
   }
 }
 
 void writeEEPROM() {
-  if ( DEBUG ) {
+  #ifdef DEBUG
     Traceln(F("Writing EEPROM"));
-  }
+  #endif
   for (unsigned int t = 0; t < sizeof(settings); t++)
     EEPROM.write(CONFIG_START + t, *((char*)&settings + t));
 }
