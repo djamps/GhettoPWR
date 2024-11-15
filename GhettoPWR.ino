@@ -1,5 +1,5 @@
 //#define DEBUG true
-#define TEMP true // Temp sensor present
+//#define TEMP true // Temp sensor present
 //#define REV04B true // for <= 0.4b boards (comment both for 0.4c)
 #define REV05 true // for >=0.5 boards (comment both for 0.4c)
 #define SIGDET 1  // Signal detect mode: 2 = Always on, 1 = I2C, 0 = Mute pin
@@ -61,7 +61,7 @@ struct SettingsStruct {
 } settings = {
   CONFIG_VERSION,
   // The default values
-  14.7, 28.2
+  14.3, 28.2
 };
 
 // Begin configurable options
@@ -93,6 +93,7 @@ unsigned long requestEventLast = 0;
 uint8_t signalDetectMode = SIGDET;  // 2 = Always on, 1 = I2C from ghettoDSP, 0 = Mute pin
 // End configurable options
 
+uint8_t chargeFault = false;
 bool watchDogTimerDisabled = false; // Internal flag for temporary disable (DSP programming, ect)
 unsigned long lastNoAudioDetected = 0; // Time of last no-audio detection for standby/shutdown calculations
 
@@ -143,7 +144,7 @@ float tempCAvgSum = 0;
 unsigned long tempCAvgLast = millis();
 unsigned long tempCAvgCount = 0;
 
-uint8_t stateBattery = 0; // Battery charge state 0 = below cutoff, 1 = low warning, 2 = good
+uint8_t stateBattery = 2; // Battery charge state 0 = below cutoff, 1 = low warning, 2 = good
 uint8_t stateSys; // System state
 int fadeLed = 0; // LED fading related
 unsigned long  fadeLedLast = millis(); // LED fading related
@@ -204,7 +205,7 @@ void setup() {
   pinMode(pinMute, INPUT);
   pinMode(pinButton, INPUT);
 
-  readVoltages();
+  readVoltages(true);
   
   //digitalWrite(pinButton, LOW); // disable pullup
   // Was the button pressed?   If not, then we are charging or programming
@@ -504,21 +505,28 @@ void handlePwrState() {
   }
 }
 
-void readVoltages() {
+void readVoltages(bool resetAvg) {
 
   voltageBatt = analogRead(pinVbatt) / settings.vComp;
   voltageBuck = analogRead(pinVbuck) / settings.vComp;
   voltageBoost = analogRead(pinVboost) / settings.vComp;
   voltageChargeOut = analogRead(pinVchargeOut) / settings.vComp;
 
+  if ( resetAvg ) {
+    voltageBattAvg = voltageBatt;
+    voltageBattAvgLast = millis();
+    voltageBattAvgSum = 0;
+    voltageBattAvgCount = 0;
+  }
+
   #ifdef REV05
   voltageChargeIn = analogRead(pinVchargeIn) / settings.vComp;
   #endif
 
-  if ( voltageBattAvg == 0 )
-  {
-    voltageBattAvg = voltageBatt;
-  }
+//  if ( voltageBattAvg == 0 )
+//  {
+//    voltageBattAvg = voltageBatt;
+//  }
   // Calculate average
   if ( millis() > 5000 & millis() - 5000 > voltageBattAvgLast )
   {
@@ -636,6 +644,7 @@ void doPowerOn() {
   digitalWrite(pinBuck, HIGH);
   statePower = 1;
   delay(500);
+  readVoltages(true);
   if ( signalDetectMode == 2 ) {
     audioDetected = 1; // Always on
   }
@@ -665,17 +674,21 @@ void handleCharging() {
   if ( stateCharging == 1 && voltageChargeIn < voltageChargeInMin ) {
     digitalWrite(pinCharge, LOW);
     stateCharging = 0;
+    chargeFault = true;
     doDebug("Charge: Stopping for low input voltage");
   }
   #endif
   // Only run once per 30 seconds while charging
-  if ( (( millis() > 30000 ) && ( millis() - 30000 > chargingLast )) || !chargingLast || !stateCharging ) {
+  if ( ((( millis() > 30000 ) && ( millis() - 30000 > chargingLast )) || !chargingLast || !stateCharging )) {
+    doDebug("Charge: Checking");
     chargingLast = millis();
+    #ifdef REV04B
     // Disable charging briefly to check voltages
     digitalWrite(pinCharge, LOW);
     stateCharging = 0;
     delay(100);
-    readVoltages();
+    #endif
+    readVoltages(false);
     // If voltage dropped below the threshold, clear the shitterWasFull flag and allow charging again
     if ( voltageBatt < voltageBattResumeCharge && shitterWasFull == true ) {
       shitterWasFull = false;
@@ -693,20 +706,20 @@ void handleCharging() {
       // Start charging
       digitalWrite(pinCharge, HIGH);
       stateCharging = 1;
-      //doDebug("Charge: Begin1");
+      doDebug("Charge: Begin");
     } else if ( voltageBattAvg >= settings.voltageBattMaxCharge ) {
       // Battery is full.   Quit charging until voltage drops below the resume threshold
+      digitalWrite(pinCharge, LOW);
+      stateCharging = 0;
       shitterWasFull = true;
       doDebug("Charge: Full + set shitter flag");
-      // If we're not powered on, shut down so it doesn't stay secretly on after charger removal.
-//      if ( !statePower ) {
-//        doPowerOff();
-//      }
     } else if ( !statePower && ( shitterWasFull || ( voltageChargeOut < settings.voltageBattMaxCharge )  ) && stateLv ) {
       // Charging power removed or charging finished while in power off state
       doDebug("Shutdown: No longer charging");
       blinkLed(6);
       doPowerOff();
+    } else {
+      doDebug("Charge: No conditions met!");
     }
     // Shut down if not plugged into adequate charger and not charging in poweroff state.
     // This is to protect the battery when charging is done or stopped for whatever reason
@@ -718,7 +731,7 @@ void handleCharging() {
 
 void loop() {
     // Measure power supply voltages
-    readVoltages();
+    readVoltages(false);
 
     // Calculate optimum power state
     calcPwrState();
@@ -727,7 +740,7 @@ void loop() {
     handlePwrState();
 
     // Measure power supply voltages
-    readVoltages();
+    readVoltages(false);
 
   // Handle these 500ms tasks
   if ( millis() > 500 && millis() - 500 >= last500mSecTask  ) {
@@ -804,8 +817,9 @@ void doLog() {
     #endif
     Trace (F("/"));
     Trace (voltageChargeOut);
-    Trace (F(" stateHv/LV/DSP/CH/SF: "));
+    Trace (F(" SP/HV/LV/DSP/CH/SF: "));
     //Trace (digitalRead(pinBoost));
+    Trace (statePower);
     Trace (stateHv);
     //Trace (digitalRead(pinBuck));
     Trace (stateLv);
@@ -828,10 +842,12 @@ void doLog() {
 }
 
 void blinkLed(int n) {
+  digitalWrite(pinLed,false);
+  delay(1000);
   while(n > 0 ) {
-    digitalWrite(pinLed,false);
-    delay(300);
     digitalWrite(pinLed,true);
+    delay(300);
+    digitalWrite(pinLed,false);
     delay(300);
     n--;
   }
