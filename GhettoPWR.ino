@@ -359,7 +359,7 @@ void calculatePowerState() {
   if (sysState.voltageBattAvg < sysConf.cutoffLv && sysState.dspPower && !sysState.charging) {
     debugMessage("Shutdown: Battery critical");
     logSystemState();
-    blinkLed(CRITICAL_BATTERY);
+    blinkLed(BLINK_CRITICAL_BATTERY);
     sysState.batteryState = BATTERY_CRITICAL;
     powerOff();
   }
@@ -372,7 +372,7 @@ void calculatePowerState() {
   // Check for over temperature
   if (sysState.temperatureAvg > sysConf.tempShutdown && millis() > TEMP_READING_DELAY) {
     debugMessage("Shutdown: Over temp");
-    blinkLed(OVER_TEMPERATURE);
+    blinkLed(BLINK_OVER_TEMPERATURE);
     powerOff();
   }
   
@@ -380,7 +380,7 @@ void calculatePowerState() {
   if (sysConf.watchDogTimer > 0 && !sysState.watchdogDisabled && sysState.lvPower && 
       millis() > sysConf.watchDogTimer && millis() - sysConf.watchDogTimer > requestEventLast) {
     debugMessage("Shutdown: Watchdog!");
-    blinkLed(WATCHDOG_TIMEOUT);
+    blinkLed(BLINK_WATCHDOG_TIMEOUT);
     powerOff();
   }
 }
@@ -407,7 +407,7 @@ void handlePowerState() {
   // Inactivity shutdown
   if (lastNoAudioDetected > 0 && millis() - lastNoAudioDetected > sysConf.autoShutOffDelay && sysState.dspPower) {
     debugMessage("Shutdown: Inactivity");
-    blinkLed(INACTIVITY);
+    blinkLed(BLINK_INACTIVITY);
     powerOff();
   }
 }
@@ -456,7 +456,7 @@ void handleCharging() {
 
     if (sysState.canCharge) {
       // Start charging
-      if ( sysState.charging ) {
+      if ( !sysState.charging ) {
         debugMessage("Charge: Begin");
       }
       digitalWrite(pins.CHARGE, HIGH);
@@ -472,7 +472,7 @@ void handleCharging() {
     } else if (!sysState.dspPower && (sysState.chargeFull || sysState.voltageChargeOut < sysConf.voltageBattMaxCharge) && sysState.lvPower) {
       // Charging power removed or finished while in power off state
       debugMessage("Shutdown: No longer charging");
-      blinkLed(NO_LONGER_CHARGING);
+      blinkLed(BLINK_NO_LONGER_CHARGING);
       powerOff();
     } else {
       debugMessage("Charge: No conditions met!");
@@ -658,7 +658,7 @@ void checkPowerButton() {
     
     if (sysState.dspPower) {
       debugMessage("Shutdown: Button push");
-      blinkLed(BUTTON_PUSH);
+      blinkLed(BLINK_BUTTON_PUSH);
       powerOff();
     } else {
       powerOn();
