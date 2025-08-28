@@ -1,0 +1,190 @@
+// config.h
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// Debug and feature flags
+#define DEBUG false
+#define TEMP_SENSOR false      // Temp sensor present
+#define REV04B false   // for <= 0.4b boards (both for 0.4c)
+#define REV05 true       // for >=0.5 boards (both for 0.4c)
+#define SIGDET 1         // Signal detect mode: 2 = Always on, 1 = I2C, 0 = Mute pin
+#define WATCHDOG true    // I2C Watchdog timer
+
+// Constants
+#define I2C_SLAVE_ADDRESS 0x30
+#define CONFIG_VERSION "0.1" // 3 chars - Change to force EEPROM write/replace
+#define CONFIG_START 32 // EEPROM config offset
+#define AVERAGING_INTERVAL 5000
+#define PERCENT_AVG_INTERVAL 10000
+#define FAN_UPDATE_INTERVAL 5000
+#define TASK_INTERVAL 500
+
+// Configuration
+struct Configuration {
+  float voltageBattMinCharge = 9.0;
+  float voltageBattResumeCharge = 13.0;
+  float voltageBattRestingFull = 13.2;
+  float voltageBattRestingEmpty = 12.4;
+  float voltageBattChargingEmpty = 13.0;
+  float voltageBattChargingFull = 13.7;
+  
+  float voltageBattMaxCharge = 14.1; // will be replaced by DSP setting (when allowOverride = true)
+  float vComp = 27.36; // will be replaced by DSP setting (when allowOverride = true)
+  bool  allowOverride = false; // Allow DSP to override max charge and vcomp
+  bool  useEEPROM = true; // max charge and vcomp saved in EEPROM and overrides conf after first start
+  
+#if REV05
+  float voltageChargeInMin = 11.8;
+#endif
+  float cutoffHv = 12.0;
+  float cutonHv = 12.5;
+  float cutoffLv = 11.5;
+  unsigned long powerStateDelay = 5000;
+  unsigned long autoShutOffDelay = 600000;
+  unsigned long standbyDelay = 60000;
+#if WATCHDOG
+  unsigned long watchDogTimer = 8000;
+#else
+  unsigned long watchDogTimer = 0;
+#endif
+  uint8_t signalDetectMode = SIGDET;
+  
+  // Temperature settings (C)
+  uint8_t fanTempLow = 35;
+  uint8_t fanTempMed = 40;
+  uint8_t fanTempHigh = 45;
+  uint8_t tempShutdown = 65;
+};
+
+// Poweroff Reason (# of blinks)
+enum PowerOffReason {
+
+  BUTTON_PUSH = 1,
+  INACTIVITY = 2,
+  WATCHDOG_TIMEOUT = 3,
+  OVER_TEMPERATURE = 4,
+  CRITICAL_BATTERY = 5,
+  NO_LONGER_CHARGING = 6,
+};
+
+// System State Constants
+enum SystemState {
+  STATE_LOW_BATTERY_SHUTDOWN = 1,   // Slow blink
+  STATE_LOW_BATTERY_WARNING = 2,    // Fast blink
+  STATE_POWER_ON_NORMAL = 3,        // Solid on
+  STATE_POWER_ON_STANDBY = 4,       // Normal fade
+  STATE_CHARGING = 5,               // Fade up
+  STATE_POWER_OFF = 6               // Slow fade
+};
+
+// Battery State Constants
+enum BatteryState {
+  BATTERY_CRITICAL = 0,     // Below cutoff - shutdown
+  BATTERY_LOW = 1,          // Low warning
+  BATTERY_GOOD = 2          // Good condition
+};
+
+// Fan speed state constants
+enum FanStates {
+  FAN_OFF = 0,
+  FAN_LOW = 100,
+  FAN_MED = 175,
+  FAN_HIGH = 255
+};
+
+// Timing Constants
+enum TimingConstants {
+  DEBOUNCE_DELAY = 10,
+  POWER_OFF_DELAY = 2000,
+  CAP_DISCHARGE_DELAY = 1500,
+  POWER_ON_DELAY = 500,
+  CHARGING_CHECK_DELAY = 30000,
+  TEMP_READING_DELAY = 5000,
+  BUTTON_READING_DELAY = 5000
+};
+
+// Pin definitions
+struct PinDefinitions {
+  const uint8_t BOOST = 2;      // Boost converter turn on output (amp) / HIGH = boost on
+  const uint8_t BUCK = 3;       // Buck converter turn on output (5v) / HIGH = buck on
+  const uint8_t MUTE = 4;       // Signal detection input / HIGH = signal, LOW = no signal
+  const uint8_t LED = 5;        // Status LED output
+  const uint8_t BUTTON = 6;     // Power on/off button input
+  const uint8_t CHARGE = 7;     // Charge turn on output / HIGH = charge
+#if REV04B
+  const uint8_t FAN = 0;        // Fan control output for <= 0.4b boards
+#else
+  const uint8_t FAN = 9;        // Fan control output for >= 0.4c rev boards
+#endif
+  const uint8_t VBATT = A0;     // Battery voltage sense input
+  const uint8_t VBUCK = A1;     // Buck converter voltage sense input
+  const uint8_t VBOOST = A2;    // Boost converter voltage sense input
+  const uint8_t VCHARGEOUT = A3; // Charging Boost/Buck output
+  const uint8_t TEMP = A6;      // Temp sensor input
+#if REV05
+  const uint8_t VCHARGEIN = A7; // Charging Boost/Buck input
+#endif
+  const uint8_t DSP = 10;
+};
+
+// EEPROM settings structure
+struct EEPROMSettings {
+  char version[4];
+  float voltageBattMaxCharge;
+  float vComp;
+};
+
+// System state structure
+struct SystemStateStruct {
+  bool lvPower = false;           // Buck converter on/off
+  bool hvPower = false;           // Boost converter on/off
+  bool charging = false;          // Charging on/off
+  bool dspPower = false;          // DSP board power status
+  uint8_t batteryPercent = 0;   // Battery charge percent
+  uint8_t batteryPercentAvg = 0;
+  uint8_t batteryState = BATTERY_GOOD; // Battery charge state
+  uint8_t systemState = STATE_POWER_OFF; // System state for LED indicators
+  uint8_t fanState = FAN_OFF;
+  bool audioDetected = false;
+  bool chargeFull = false;      // Battery charge full based on user settings
+  bool chargeFault = false;
+  bool canCharge = false;
+  bool watchdogDisabled = false;
+  
+  // Voltage measurements
+  float voltageBatt = 0;
+  float voltageBuck = 0;
+  float voltageBoost = 0;
+  float voltageBattAvg = 0;
+  float voltageChargeOut = 0;
+#if REV05
+  float voltageChargeIn = 0;
+#endif
+  float temperature = 0;
+  float temperatureAvg = 0;
+};
+
+// Function declarations
+void initializePins();
+void readVoltages(bool resetAvg);
+void calculatePowerState();
+void handlePowerState();
+void handleCharging();
+void handleFanState();
+void handleLedState();
+void powerOff();
+void powerOn();
+void checkPowerButton();
+void checkMutePin();
+void blinkLed(int count);
+bool readEEPROM();
+void writeEEPROM();
+void debugMessage(const char *text);
+void logSystemState();
+void updateFade(int interval, int minValue, int maxValue, bool resetAtTop = false);
+
+// I2C event handlers
+void receiveEvent(int nBytes);
+void requestEvent();
+
+#endif // CONFIG_H
