@@ -486,33 +486,25 @@ void handleFanState() {
     uint8_t newFanSpeed = 0;
     
 #if TEMP_SENSOR
-  switch (true) {
-    case (sysState.charging == true):
-        sysState.fanState = FAN_HIGH;
-        break;
-    case (sysState.temperatureAvg >= sysConf.fanTempHigh):
-        sysState.fanState = FAN_HIGH;
-        break;
-    case (sysState.temperatureAvg >= sysConf.fanTempMed):
-        sysState.fanState = FAN_MED;
-        break;
-    case (sysState.temperatureAvg >= sysConf.fanTempLow):
-        // If not already on, give the fan a bump start
-        if (sysState.fanState == FAN_OFF) {
-            analogWrite(pins.FAN, FAN_HIGH);
-            delay(50);
-        }
-        sysState.fanState = FAN_LOW;
-        break;
-    default:
-        // Handle temperature below fanTempLow
-        sysState.fanState = FAN_OFF;
-        break;
-  }
+    if (sysState.charging == true) {
+          sysState.fanState = FAN_HIGH;
+    } else if (sysState.temperatureAvg >= sysConf.fanTempHigh) {
+          sysState.fanState = FAN_HIGH;
+    } else if (sysState.temperatureAvg >= sysConf.fanTempMed) {
+          sysState.fanState = FAN_MED;
+    } else if (sysState.temperatureAvg >= sysConf.fanTempLow) {
+      // If not already on, give the fan a bump start
+      if (sysState.fanState == FAN_OFF) {
+        analogWrite(pins.FAN, FAN_HIGH);
+        delay(50);
+      }
+      sysState.fanState = FAN_LOW;
+    } else {
+      sysState.fanState = FAN_OFF;
+    }
 #else
     sysState.fanState = FAN_HIGH;
 #endif
-
     analogWrite(pins.FAN, sysState.fanState);
     lastFanSpeedChange = millis();
   }
@@ -670,7 +662,9 @@ void checkPowerButton() {
 void checkMutePin() {
   if (sysConf.signalDetectMode == 0 && sysConf.standbyDelay > 0) {
     sysState.audioDetected = digitalRead(pins.MUTE);
-    
+    if ( SIGDET_MUTEPIN_INV ) {
+      sysState.audioDetected = !sysState.audioDetected;
+    }
     if (!sysState.audioDetected) {
       lastNoAudioDetected = millis();
     } else {
