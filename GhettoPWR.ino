@@ -602,21 +602,23 @@ void powerOff() {
   sysState.watchdogDisabled = true;
   digitalWrite(pins.DSP, LOW);
   digitalWrite(pins.BUCK, LOW);
-
-  // Let the caps discharge (turnoff pop)
   delay(CAP_DISCHARGE_DELAY);
-
-  // nothing gets executed from here down unless getting power from the programmer.
+  
+  // nothing gets executed from here down unless getting power from the programmer (OR CHARGER!!! BE CAREFUL!!!).
   // re-enable buck converter and log voltages/states until power removed:
-  sysState.lvPower = true;
-  digitalWrite(pins.BUCK, HIGH);
-  while(1) {
-    wdt_reset();
-    readVoltages(false);
-    logSystemState();
-    delay(2000);
+#if DEBUG
+  if ( !(sysState.systemState == STATE_CHARGING) ) {
+    // Let the caps discharge (turnoff pop)
+    sysState.lvPower = true;
+    digitalWrite(pins.BUCK, HIGH);
+    while(1) {
+      wdt_reset();
+      readVoltages(false);
+      logSystemState();
+      delay(2000);
+    }
   }
-
+#endif
 }
 
 // Power on sequence
