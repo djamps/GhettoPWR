@@ -13,7 +13,7 @@ SystemStateStruct sysState;
 EEPROMSettings eepromSettings = {CONFIG_VERSION, sysConf.voltageBattMaxCharge, sysConf.vComp};
 
 // Timing variables
-unsigned long lastTaskTime = 0;
+unsigned long last1secTaskTime = 0;
 unsigned long lastNoAudioDetected = 0;
 unsigned long lastFanSpeedChange = 0;
 unsigned long lastPwrStateChange = millis();
@@ -33,9 +33,12 @@ unsigned long voltageBattAvgLast = millis();
 unsigned long percentBatteryAvgSum = 0;
 unsigned long percentBatteryAvgCount = 0;
 unsigned long percentBatteryAvgLast = millis();
-float tempCAvgSum = 0;
-unsigned long tempCAvgCount = 0;
-unsigned long tempCAvgLast = millis();
+float temp1CAvgSum = 0;
+unsigned long temp1CAvgCount = 0;
+unsigned long temp1CAvgLast = millis();
+float temp2CAvgSum = 0;
+unsigned long temp2CAvgCount = 0;
+unsigned long temp2CAvgLast = millis();
 
 // Debug helpers
 #if DEBUG
@@ -85,6 +88,10 @@ void setup() {
       writeEEPROM();
     }
   }
+
+  // Increase PWM frequency for fans to ~31kHz to reduce noise (D9 and D10)
+  TCCR1B = TCCR1B & B11111000 | B00000001;  // /1 prescaler
+  TIMSK1 = 0;  // Disable *all* Timer1 interrupts due to i2c hangs
   
   // Initialize I2C
   Wire.begin(I2C_SLAVE_ADDRESS);
@@ -93,7 +100,7 @@ void setup() {
   
   // Initialize pins
   initializePins();
-  
+
   // Read initial voltages
   readVoltages(true);
   
@@ -126,8 +133,8 @@ void loop() {
   // Control power state
   handlePowerState();
   
-  // Handle periodic tasks
-  if (millis() - TASK_INTERVAL >= lastTaskTime) {
+  // Handle 1sec tasks
+  if (millis() - 1000 >= last1secTaskTime) {
     wdt_reset();
     
     // Handle charging if LV power is on
@@ -137,8 +144,10 @@ void loop() {
     
     // Control fan state
     handleFanState();
+
+    logSystemState();
     
-    lastTaskTime = millis();
+    last1secTaskTime = millis();
   }
   
   // Handle LED state
@@ -150,22 +159,20 @@ void loop() {
   // Check signal detection in mute pin mode
   checkMutePin();
   
-  // Debug logging
-  #if DEBUG
-    if (millis() - 1000 > lastTaskTime) {
-      logSystemState();
-      lastTaskTime = millis();
-    }
-  #endif
 }
 
 // Initialize all pins
 void initializePins() {
   pinMode(pins.DSP, OUTPUT);
   digitalWrite(pins.DSP, LOW);
-  pinMode(pins.FAN, OUTPUT);
-  analogWrite(pins.FAN, 0);
-  pinMode(pins.TEMP, INPUT);
+  pinMode(pins.FAN1, OUTPUT);
+  #if REV20
+  pinMode(pins.FAN2, OUTPUT);
+  pinMode(pins.TEMP2,INPUT);
+  analogWrite(pins.FAN2, 0);
+  #endif
+  analogWrite(pins.FAN1, 0);
+  pinMode(pins.TEMP1, INPUT);
   pinMode(pins.CHARGE, OUTPUT);
   digitalWrite(pins.CHARGE, LOW);
   pinMode(pins.BOOST, OUTPUT);
@@ -175,7 +182,7 @@ void initializePins() {
   digitalWrite(pins.LED, HIGH);
   pinMode(pins.MUTE, INPUT);
   pinMode(pins.BUTTON, INPUT);
-  #if REV05
+  #if REV05 || REV20
   pinMode(pins.VCHARGEIN,INPUT);
   #endif
 }
@@ -229,7 +236,7 @@ void requestEvent() {
   } response;
   
   response.voltageBattAvg = sysState.voltageBattAvg;
-  response.temperature = sysState.temperatureAvg;
+  response.temperature = max(sysState.temperature1Avg,sysState.temperature2Avg);
   response.dspPower = sysState.dspPower;
   response.charging = sysState.charging;
   response.systemState = sysState.systemState;
@@ -244,11 +251,10 @@ void requestEvent() {
 void readVoltages(bool resetAvg) {
   // Read raw voltages
   sysState.voltageBatt = analogRead(pins.VBATT) / sysConf.vComp;
-  sysState.voltageBuck = analogRead(pins.VBUCK) / sysConf.vComp;
   sysState.voltageBoost = analogRead(pins.VBOOST) / sysConf.vComp;
   sysState.voltageChargeOut = analogRead(pins.VCHARGEOUT) / sysConf.vComp;
   
-#if REV05
+#if REV05 || REV20
   sysState.voltageChargeIn = analogRead(pins.VCHARGEIN) / sysConf.vComp;
 #endif
 
@@ -313,20 +319,32 @@ void readVoltages(bool resetAvg) {
   }
   
   // Read temperature
-  #if TEMP_SENSOR
-    sysState.temperature = ((float(analogRead(pins.TEMP)) * 5.0 / 1024) - 0.5) * 100;
-  #endif
-  
+#if TEMP_SENSOR1
+  sysState.temperature1 = ((float(analogRead(pins.TEMP1)) * 5.0 / 1024) - 0.5) * 100;
   // Calculate temperature average
-  if (millis() > AVERAGING_INTERVAL && millis() - AVERAGING_INTERVAL > tempCAvgLast) {
-    sysState.temperatureAvg = tempCAvgSum / tempCAvgCount;
-    tempCAvgSum = 0;
-    tempCAvgCount = 0;
-    tempCAvgLast = millis();
+  if (millis() > AVERAGING_INTERVAL && millis() - AVERAGING_INTERVAL > temp1CAvgLast) {
+    sysState.temperature1Avg = temp1CAvgSum / temp1CAvgCount;
+    temp1CAvgSum = 0;
+    temp1CAvgCount = 0;
+    temp1CAvgLast = millis();
   } else {
-    tempCAvgSum += sysState.temperature;
-    tempCAvgCount++;
+    temp1CAvgSum += sysState.temperature1;
+    temp1CAvgCount++;
   }
+#endif
+#if TEMP_SENSOR2 && REV20
+  sysState.temperature2 = ((float(analogRead(pins.TEMP2)) * 5.0 / 1024) - 0.5) * 100;
+  // Calculate temperature average
+  if (millis() > AVERAGING_INTERVAL && millis() - AVERAGING_INTERVAL > temp2CAvgLast) {
+    sysState.temperature2Avg = temp2CAvgSum / temp2CAvgCount;
+    temp2CAvgSum = 0;
+    temp2CAvgCount = 0;
+    temp2CAvgLast = millis();
+  } else {
+    temp2CAvgSum += sysState.temperature2;
+    temp2CAvgCount++;
+  }
+#endif
 }
 
 // Calculate optimal power state based on conditions
@@ -335,8 +353,8 @@ void calculatePowerState() {
   if (sysState.voltageBattAvg > sysConf.cutonHv) {
     sysState.batteryState = BATTERY_GOOD;
     
-    // Audio signal detected?
-    if (sysState.audioDetected && sysState.dspPower) {
+    // Audio signal detected?   Temps OK?
+    if (sysState.audioDetected && sysState.dspPower && sysState.temp1State && sysState.temp2State ) {
       sysState.hvPower = HIGH; // Turn on HV
     } else {
       // No audio, turn off amp after standby delay
@@ -358,9 +376,9 @@ void calculatePowerState() {
   // Battery critically low - shut everything down
   if (sysState.voltageBattAvg < sysConf.cutoffLv && sysState.dspPower && !sysState.charging) {
     debugMessage("Shutdown: Battery critical");
+    sysState.batteryState = BATTERY_CRITICAL;
     logSystemState();
     blinkLed(BLINK_CRITICAL_BATTERY);
-    sysState.batteryState = BATTERY_CRITICAL;
     powerOff();
   }
   
@@ -369,11 +387,26 @@ void calculatePowerState() {
     sysState.lvPower = true;
   }
   
-  // Check for over temperature
-  if (sysState.temperatureAvg > sysConf.tempShutdown && millis() > TEMP_READING_DELAY) {
-    debugMessage("Shutdown: Over temp");
+  // Check for main board over temperature
+  if (sysState.temperature1Avg > sysConf.temp1Shutdown && millis() > TEMP_READING_DELAY) {
+    sysState.temp1State = TEMP_HIGH;
+    debugMessage("Shutdown: Over temp 1");
     blinkLed(BLINK_OVER_TEMPERATURE);
     powerOff();
+  } else {
+    sysState.temp1State = TEMP_OK;
+  }
+
+  // Check for aux over temperature
+  if (sysState.temperature2Avg > sysConf.temp2Shutdown && millis() > TEMP_READING_DELAY) {
+    debugMessage("HV shutdown: Over temp 2");
+    sysState.temp2State = TEMP_HIGH;
+    sysState.systemState = STATE_OVER_TEMP;
+    if ( sysState.hvPower ) {
+      sysState.hvPower = LOW;
+    }
+  } else {
+    sysState.temp2State = TEMP_OK;
   }
   
   // Watchdog timeout poweroff
@@ -414,7 +447,7 @@ void handlePowerState() {
 
 // Handle charging logic
 void handleCharging() {
-#if REV05
+#if REV05 || REV20
   // Check for low input voltage
   if (sysState.charging && sysState.voltageChargeIn < sysConf.voltageChargeInMin) {
     digitalWrite(pins.CHARGE, LOW);
@@ -426,7 +459,7 @@ void handleCharging() {
 
   // Only run once per 30 seconds while charging
   if ((millis() > CHARGING_CHECK_DELAY && millis() - CHARGING_CHECK_DELAY > chargingLast) || !chargingLast || !sysState.charging) {
-    debugMessage("Charge: Checking");
+    //debugMessage("Charge: Checking");
     chargingLast = millis();
     
 #if REV04B
@@ -449,8 +482,9 @@ void handleCharging() {
                        sysState.voltageBatt > sysConf.voltageBattMinCharge &&
                        sysState.voltageBatt < sysConf.voltageBattMaxCharge &&
                        !sysState.chargeFull &&
-                       sysState.temperature < sysConf.tempShutdown;
-#if REV05
+                       sysState.temperature1 < sysConf.temp1Shutdown &&
+                       sysState.temperature2 < sysConf.temp2Shutdown;
+#if REV05 || REV20
     sysState.canCharge = sysState.canCharge && sysState.voltageChargeIn > sysConf.voltageChargeInMin;
 #endif
 
@@ -475,7 +509,7 @@ void handleCharging() {
       blinkLed(BLINK_NO_LONGER_CHARGING);
       powerOff();
     } else {
-      debugMessage("Charge: No conditions met!");
+      //debugMessage("Charge: No conditions met!");
     }
   }
 }
@@ -485,27 +519,50 @@ void handleFanState() {
   if (millis() - FAN_UPDATE_INTERVAL >= lastFanSpeedChange) {
     uint8_t newFanSpeed = 0;
     
-#if TEMP_SENSOR
+#if TEMP_SENSOR1
     if (sysState.charging == true) {
-          sysState.fanState = FAN_HIGH;
-    } else if (sysState.temperatureAvg >= sysConf.fanTempHigh) {
-          sysState.fanState = FAN_HIGH;
-    } else if (sysState.temperatureAvg >= sysConf.fanTempMed) {
-          sysState.fanState = FAN_MED;
-    } else if (sysState.temperatureAvg >= sysConf.fanTempLow) {
+          sysState.fan1State = FAN_HIGH;
+    } else if (sysState.temperature1Avg >= sysConf.fan1TempHigh) {
+          sysState.fan1State = FAN_HIGH;
+    } else if (sysState.temperature1Avg >= sysConf.fan1TempMed) {
+          sysState.fan1State = FAN_MED;
+    } else if (sysState.temperature1Avg >= sysConf.fan1TempLow) {
       // If not already on, give the fan a bump start
-      if (sysState.fanState == FAN_OFF) {
-        analogWrite(pins.FAN, FAN_HIGH);
-        delay(50);
+      if (sysState.fan1State == FAN_OFF) {
+        analogWrite(pins.FAN1, FAN_HIGH);
+        delay(100);
       }
-      sysState.fanState = FAN_LOW;
+      sysState.fan1State = FAN_LOW;
     } else {
-      sysState.fanState = FAN_OFF;
+      sysState.fan1State = FAN_OFF;
     }
 #else
-    sysState.fanState = FAN_HIGH;
+    // Default to full on all the time
+    sysState.fan1State = FAN_HIGH;
 #endif
-    analogWrite(pins.FAN, sysState.fanState);
+#if REV20 && TEMP_SENSOR2
+    if (sysState.temperature2Avg >= sysConf.fan2TempHigh) {
+          sysState.fan2State = FAN_HIGH;
+    } else if (sysState.temperature2Avg >= sysConf.fan2TempMed) {
+          sysState.fan2State = FAN_MED;
+    } else if (sysState.temperature2Avg >= sysConf.fan2TempLow) {
+      // If not already on, give the fan a bump start
+      if (sysState.fan2State == FAN_OFF) {
+        analogWrite(pins.FAN2, FAN_HIGH);
+        delay(50);
+      }
+      sysState.fan2State = FAN_LOW;
+    } else {
+      sysState.fan2State = FAN_OFF;
+    }
+#else
+    // Default to full on
+    sysState.fan2State = FAN_HIGH;
+#endif
+    analogWrite(pins.FAN1, sysState.fan1State);
+#if REV20
+    analogWrite(pins.FAN2, sysState.fan2State);
+#endif
     lastFanSpeedChange = millis();
   }
 }
@@ -584,6 +641,13 @@ void handleSystemState() {
     case STATE_POWER_OFF: // Slow fade
       updateFade(8, 1, 255);
       break;
+
+    case STATE_OVER_TEMP: // Really fast blink
+      if (millis() - 90 >= ledTimer) {
+        digitalWrite(pins.LED, !digitalRead(pins.LED));
+        ledTimer = millis();
+      }
+      break;
   }
 }
 
@@ -607,18 +671,22 @@ void powerOff() {
   // nothing gets executed from here down unless getting power from the programmer (OR CHARGER!!! BE CAREFUL!!!).
   // re-enable buck converter and log voltages/states until power removed:
 #if DEBUG
-  if ( !(sysState.systemState == STATE_CHARGING) ) {
-    // Let the caps discharge (turnoff pop)
-    sysState.lvPower = true;
-    digitalWrite(pins.BUCK, HIGH);
-    while(1) {
-      wdt_reset();
-      readVoltages(false);
-      logSystemState();
-      delay(2000);
-    }
-  }
+//  uint8_t n = 0;
+//  // Let the caps discharge (turnoff pop)
+//  sysState.lvPower = true;
+//  digitalWrite(pins.BUCK, HIGH);
+//  while(n < 150) { // Log voltages and system state for 5 minutes
+//    wdt_reset();
+//    readVoltages(false);
+//    logSystemState();
+//    delay(2000);
+//    n++;
+//  }
 #endif
+  // Catch-all poweroff
+  sysState.lvPower = false;
+  digitalWrite(pins.BUCK, LOW);
+  while(1);
 }
 
 // Power on sequence
@@ -725,21 +793,19 @@ void debugMessage(const char *text) {
 
 void logSystemState() {
   #if DEBUG
-    #if REV05
-      Trace(F("Vbatt/Avg/Vbuck/Vboost/VchI/VchO: "));
+    #if REV05 || REV20
+      Trace(F("Vbatt/Avg/Vboost/VchI/VchO: "));
     #else
-      Trace(F("Vbatt/Avg/Vbuck/Vboost/Vch: "));
+      Trace(F("Vbatt/Avg/Vboost/Vch: "));
     #endif
     
     Trace(sysState.voltageBatt);
     Trace(F("/"));
     Trace(sysState.voltageBattAvg);
     Trace(F("/"));
-    Trace(sysState.voltageBuck);
-    Trace(F("/"));
     Trace(sysState.voltageBoost);
     
-    #if REV05
+    #if REV05 || REV20
       Trace(F("/"));
       Trace(sysState.voltageChargeIn);
     #endif
@@ -757,8 +823,10 @@ void logSystemState() {
     Trace(sysState.audioDetected);
     Trace(F(" sS: "));
     Trace(sysState.systemState);
-    Trace(F(" tC: "));
-    Trace(sysState.temperature);
+    Trace(F(" tC1: "));
+    Trace(sysState.temperature1);
+    Trace(F(" tC2: "));
+    Trace(sysState.temperature2);
     Trace(F(" sB: "));
     Trace(sysState.batteryState);
     Trace(F(" mC: "));
